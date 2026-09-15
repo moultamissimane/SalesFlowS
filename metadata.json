@@ -1,0 +1,6 @@
+{
+  "name": "SalesFlow CRM",
+  "description": "Enterprise SaaS CRM & Sales Pipeline platform featuring multi-role access control, deals kanban, audit logs, analytics, and full Spring Boot & PostgreSQL architecture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
