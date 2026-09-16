@@ -11,8 +11,8 @@ export interface User {
   department: string;
   location: string;
   quota: number; // in MAD equivalent
-  closedRevenue: number;
-  activeDealsCount: number;
+  closedRevenue?: number;
+  activeDealsCount?: number;
   status: 'ACTIVE' | 'INACTIVE';
 }
 

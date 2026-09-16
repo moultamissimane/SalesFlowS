@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: salesflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: salesflow_db
+      POSTGRES_USER: salesflow_app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-DevSecure2026!}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesflow_app -d salesflow_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: salesflow-mailhog
+    restart: unless-stopped
+    ports:
+      - "8025:8025" # web UI
+      - "1025:1025" # SMTP
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: salesflow-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_PASSWORD: ${DB_PASSWORD:-DevSecure2026!}
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-in-production-it-must-be-long-enough-for-hs256}
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+      CORS_ALLOWED_ORIGINS: http://localhost:3001,http://localhost:3000
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: salesflow-ui
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3001:3000"
+
+volumes:
+  pgdata:
+    driver: local
+  uploads:
+    driver: local

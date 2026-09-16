@@ -7,6 +7,7 @@ import {
 import { useCrm } from '../context/CrmContext';
 import { PIPELINE_STAGES } from '../data/mockData';
 import { PipelineStage, ActivityType } from '../types';
+import { apiClient } from '../api/client';
 
 export const DealDetailModal: React.FC = () => {
   const { 
@@ -61,12 +62,7 @@ export const DealDetailModal: React.FC = () => {
 
   const handleFileUploadSim = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      uploadAttachment(deal.id, {
-        name: file.name,
-        size: file.size,
-        type: file.type || 'application/pdf',
-      });
+      uploadAttachment(deal.id, e.target.files[0]);
       e.target.value = '';
     }
   };
@@ -75,13 +71,22 @@ export const DealDetailModal: React.FC = () => {
     e.preventDefault();
     setIsDraggingFile(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0];
-      uploadAttachment(deal.id, {
-        name: file.name,
-        size: file.size,
-        type: file.type || 'application/pdf',
-      });
+      uploadAttachment(deal.id, e.dataTransfer.files[0]);
     }
+  };
+
+  const handleDownload = async (attachmentId: string, fileName: string) => {
+    const response = await apiClient.get(`/deals/${deal.id}/attachments/${attachmentId}/download`, {
+      responseType: 'blob',
+    });
+    const url = window.URL.createObjectURL(response.data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   };
 
   return (
@@ -264,7 +269,7 @@ export const DealDetailModal: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-1.5">
                       <button
-                        onClick={() => alert(`Downloading presigned S3 file: ${att.fileName}`)}
+                        onClick={() => handleDownload(att.id, att.fileName)}
                         className="p-1 text-slate-400 hover:text-indigo-400 rounded"
                         title="Download file"
                       >

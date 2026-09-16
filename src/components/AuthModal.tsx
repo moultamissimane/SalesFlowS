@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
-import { X, Lock, Mail, User as UserIcon, KeyRound, Shield, RefreshCw, CheckCircle2, ArrowRight } from 'lucide-react';
+import { X, Lock, KeyRound, CheckCircle2 } from 'lucide-react';
+import { jwtDecode } from 'jwt-decode';
 import { useCrm } from '../context/CrmContext';
 import { UserRole } from '../types';
+import { DEMO_PASSWORD, DEMO_PERSONAS } from '../data/demoPersonas';
+import { getAccessToken } from '../api/client';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -9,47 +12,70 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
-  const { currentUser, switchUser, users, showToast } = useCrm();
+  const { login, register, forgotPassword, currentUser, isAuthenticated } = useCrm();
 
   const [mode, setMode] = useState<'LOGIN' | 'REGISTER' | 'FORGOT_PASSWORD' | 'JWT_INSPECT'>('LOGIN');
-  const [email, setEmail] = useState('mehdi.bennani@salesflow.ma');
-  const [password, setPassword] = useState('••••••••••••');
-  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [registerName, setRegisterName] = useState('');
+  const [registerEmail, setRegisterEmail] = useState('');
+  const [registerPassword, setRegisterPassword] = useState('');
   const [role, setRole] = useState<UserRole>('SALES_AGENT');
+
   const [resetSent, setResetSent] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const existing = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (existing) {
-      switchUser(existing.id);
-      showToast('success', 'Logged In', `Authenticated as ${existing.name} (${existing.role})`);
-    } else {
-      // Authenticate as first user with that role
-      const byRole = users.find(u => u.role === role) || users[0];
-      switchUser(byRole.id);
-      showToast('success', 'Logged In', `Authenticated as ${byRole.name} (${byRole.role})`);
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      await login(email, password);
+      onClose();
+    } catch {
+      setError('Invalid email or password.');
+    } finally {
+      setIsSubmitting(false);
     }
-    onClose();
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    showToast('success', 'Account Registered', `Created profile for ${name || 'New Executive'}. JWT issued.`);
-    onClose();
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      await register(registerName, registerEmail, registerPassword, role);
+      onClose();
+    } catch {
+      setError('Could not create an account with those details.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleForgot = (e: React.FormEvent) => {
+  const handleForgot = async (e: React.FormEvent) => {
     e.preventDefault();
+    await forgotPassword(email);
     setResetSent(true);
-    showToast('info', 'Password Reset Email Dispatched', `Reset instructions sent to ${email}`);
     setTimeout(() => {
       setResetSent(false);
       setMode('LOGIN');
-    }, 2000);
+    }, 2500);
   };
+
+  const token = getAccessToken();
+  let decodedClaims: Record<string, unknown> | null = null;
+  if (token) {
+    try {
+      decodedClaims = jwtDecode(token);
+    } catch {
+      decodedClaims = null;
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
@@ -65,9 +91,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               <p className="text-[11px] text-slate-400">Stateless bearer tokens with RBAC roles</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">
-            <X className="w-5 h-5" />
-          </button>
+          {isAuthenticated && (
+            <button onClick={onClose} className="text-slate-400 hover:text-white">
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
         {/* Tab selection */}
@@ -98,19 +126,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           </button>
         </div>
 
+        {error && (
+          <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-900/50 text-xs text-rose-300">
+            {error}
+          </div>
+        )}
+
         {/* LOGIN FORM */}
         {mode === 'LOGIN' && (
           <form onSubmit={handleLogin} className="space-y-3 pt-1">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Select Persona / Role</label>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Quick Demo Login</label>
               <div className="space-y-1.5">
-                {users.map((u) => (
+                {DEMO_PERSONAS.map((u) => (
                   <button
-                    key={u.id}
+                    key={u.email}
                     type="button"
                     onClick={() => {
                       setEmail(u.email);
-                      setRole(u.role);
+                      setPassword(DEMO_PASSWORD);
                     }}
                     className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between text-xs transition ${
                       email.toLowerCase() === u.email.toLowerCase()
@@ -157,9 +191,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
             <button
               type="submit"
-              className="w-full py-2 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition mt-2"
+              disabled={isSubmitting}
+              className="w-full py-2 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition mt-2 disabled:opacity-50"
             >
-              Sign In (Generate Spring JWT)
+              {isSubmitting ? 'Signing in…' : 'Sign In (Generate Spring JWT)'}
             </button>
           </form>
         )}
@@ -172,8 +207,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               <input
                 type="text"
                 required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                value={registerName}
+                onChange={(e) => setRegisterName(e.target.value)}
                 placeholder="Youssef El Mansouri"
                 className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
               />
@@ -184,6 +219,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               <input
                 type="email"
                 required
+                value={registerEmail}
+                onChange={(e) => setRegisterEmail(e.target.value)}
                 placeholder="youssef@salesflow.ma"
                 className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
@@ -198,8 +235,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               >
                 <option value="SALES_AGENT">SALES_AGENT (Standard)</option>
                 <option value="SALES_MANAGER">SALES_MANAGER (Approval & Reporting)</option>
-                <option value="ADMIN">ADMIN (Full Security & Compliance)</option>
               </select>
+              <p className="text-[10px] text-slate-500 mt-1">ADMIN accounts can't self-register - only seeded or promoted by an existing admin.</p>
             </div>
 
             <div>
@@ -207,6 +244,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               <input
                 type="password"
                 required
+                minLength={8}
+                value={registerPassword}
+                onChange={(e) => setRegisterPassword(e.target.value)}
                 placeholder="Minimum 8 characters"
                 className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
               />
@@ -214,9 +254,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
             <button
               type="submit"
-              className="w-full py-2 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition mt-2"
+              disabled={isSubmitting}
+              className="w-full py-2 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition mt-2 disabled:opacity-50"
             >
-              Register & Initialize Profile
+              {isSubmitting ? 'Creating account…' : 'Register & Initialize Profile'}
             </button>
           </form>
         )}
@@ -225,7 +266,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         {mode === 'FORGOT_PASSWORD' && (
           <form onSubmit={handleForgot} className="space-y-3 pt-1">
             <p className="text-xs text-slate-400">
-              Enter your corporate email address to receive an HMAC-SHA256 one-time password reset link.
+              Enter your corporate email address to receive a one-time password reset token (check MailHog at localhost:8025 in dev).
             </p>
 
             <div>
@@ -242,7 +283,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             {resetSent ? (
               <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span>Verification token dispatched!</span>
+                <span>If that account exists, a reset token has been emailed!</span>
               </div>
             ) : (
               <button
@@ -261,21 +302,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
               <div className="flex items-center justify-between text-slate-400">
                 <span className="font-semibold text-white">Active Session Token</span>
-                <span className="font-mono text-[10px] text-emerald-400">HS256 VALID</span>
+                <span className="font-mono text-[10px] text-emerald-400">{token ? 'HS256 VALID' : 'NO ACTIVE TOKEN'}</span>
               </div>
-              <div className="p-2 rounded bg-slate-900 border border-slate-800 font-mono text-[10px] text-indigo-300 break-all">
-                eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ7Y3VycmVudFVzZXIuaWR9IiwibmFtZSI6IntjdXJyZW50VXNlci5uYW1lfSIsInJvbGUiOiJ7Y3VycmVudFVzZXIucm9sZX0iLCJpYXQiOjE3MTAwMDAwMDAsImV4cCI6MTcxMDA4NjQwMH0.wE9J-B3...
-              </div>
+              {token && (
+                <div className="p-2 rounded bg-slate-900 border border-slate-800 font-mono text-[10px] text-indigo-300 break-all">
+                  {token}
+                </div>
+              )}
             </div>
 
-            <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
-              <div className="text-slate-400 font-semibold mb-1">Decoded Payload Claims:</div>
-              <div className="text-slate-300"><span className="text-slate-500">sub:</span> {currentUser.id}</div>
-              <div className="text-slate-300"><span className="text-slate-500">name:</span> {currentUser.name}</div>
-              <div className="text-slate-300"><span className="text-slate-500">email:</span> {currentUser.email}</div>
-              <div className="text-indigo-400"><span className="text-slate-500">role:</span> ROLE_{currentUser.role}</div>
-              <div className="text-slate-300"><span className="text-slate-500">exp:</span> 24 hours (with rolling refresh token)</div>
-            </div>
+            {decodedClaims && (
+              <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="text-slate-400 font-semibold mb-1 flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Decoded Payload Claims:</span>
+                </div>
+                {Object.entries(decodedClaims).map(([key, value]) => (
+                  <div key={key} className="text-slate-300">
+                    <span className="text-slate-500">{key}:</span> {String(value)}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {isAuthenticated && (
+              <div className="text-[11px] text-slate-500">
+                Signed in as <span className="text-slate-300">{currentUser.name}</span> ({currentUser.role})
+              </div>
+            )}
           </div>
         )}
       </div>

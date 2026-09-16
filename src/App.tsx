@@ -19,8 +19,38 @@ import { EmailModal } from './components/EmailModal';
 import { AuthModal } from './components/AuthModal';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
+const ToastStack: React.FC = () => {
+  const { toasts, removeToast } = useCrm();
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none max-w-sm">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className="pointer-events-auto flex items-start gap-3 p-3.5 rounded-xl border border-slate-700/80 bg-slate-900/95 shadow-xl backdrop-blur-md transition-all animate-in slide-in-from-right-4"
+        >
+          {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
+          {toast.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
+          {toast.type === 'info' && <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}
+
+          <div className="flex-1 min-w-0">
+            <h5 className="text-xs font-bold text-white">{toast.title}</h5>
+            <p className="text-[11px] text-slate-300 mt-0.5 leading-snug">{toast.message}</p>
+          </div>
+
+          <button
+            onClick={() => removeToast(toast.id)}
+            className="text-slate-500 hover:text-white transition p-0.5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const MainLayout: React.FC = () => {
-  const { currentView, toasts, removeToast } = useCrm();
+  const { activeView, isAuthenticated, isBootstrapping } = useCrm();
 
   // Modal states
   const [createModalType, setCreateModalType] = useState<'DEAL' | 'LEAD' | 'TASK' | 'COMPANY' | 'CONTACT' | null>(null);
@@ -32,6 +62,25 @@ const MainLayout: React.FC = () => {
     setEmailRecipient({ email, name });
     setIsEmailModalOpen(true);
   };
+
+  if (isBootstrapping) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-400 text-sm gap-3">
+        <div className="w-4 h-4 border-2 border-slate-600 border-t-indigo-500 rounded-full animate-spin" />
+        <span>Restoring session…</span>
+        <ToastStack />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950">
+        <AuthModal isOpen={true} onClose={() => {}} />
+        <ToastStack />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans antialiased selection:bg-indigo-500 selection:text-white">
@@ -48,50 +97,50 @@ const MainLayout: React.FC = () => {
 
         {/* View Switcher */}
         <main className="flex-1 overflow-y-auto bg-slate-950">
-          {currentView === 'DASHBOARD' && (
+          {activeView === 'dashboard' && (
             <DashboardView onOpenCreateDeal={() => setCreateModalType('DEAL')} />
           )}
 
-          {currentView === 'PIPELINE' && (
+          {activeView === 'pipeline' && (
             <PipelineView onOpenCreateDeal={() => setCreateModalType('DEAL')} />
           )}
 
-          {currentView === 'DEALS' && (
+          {activeView === 'deals' && (
             <DealsListView onOpenCreateDeal={() => setCreateModalType('DEAL')} />
           )}
 
-          {currentView === 'LEADS' && (
+          {activeView === 'leads' && (
             <LeadsView onOpenCreateLead={() => setCreateModalType('LEAD')} />
           )}
 
-          {currentView === 'COMPANIES' && (
+          {activeView === 'companies' && (
             <CompaniesView onOpenCreateCompany={() => setCreateModalType('COMPANY')} />
           )}
 
-          {currentView === 'CONTACTS' && (
-            <ContactsView 
-              onOpenCreateContact={() => setCreateModalType('CONTACT')} 
+          {activeView === 'contacts' && (
+            <ContactsView
+              onOpenCreateContact={() => setCreateModalType('CONTACT')}
               onOpenEmailModal={handleOpenEmail}
             />
           )}
 
-          {currentView === 'TASKS' && (
+          {activeView === 'tasks' && (
             <TasksView onOpenCreateTask={() => setCreateModalType('TASK')} />
           )}
 
-          {currentView === 'AUDIT_LOGS' && (
+          {activeView === 'audit_logs' && (
             <AuditLogsView />
           )}
 
-          {currentView === 'TRASH' && (
+          {activeView === 'recycle_bin' && (
             <RecycleBinView />
           )}
 
-          {currentView === 'SWAGGER_API' && (
+          {activeView === 'swagger_api' && (
             <SwaggerApiView />
           )}
 
-          {currentView === 'ARCHITECTURE' && (
+          {activeView === 'architecture' && (
             <ArchitectureView />
           )}
         </main>
@@ -117,31 +166,7 @@ const MainLayout: React.FC = () => {
         onClose={() => setIsAuthModalOpen(false)} 
       />
 
-      {/* Toast Notifications */}
-      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none max-w-sm">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className="pointer-events-auto flex items-start gap-3 p-3.5 rounded-xl border border-slate-700/80 bg-slate-900/95 shadow-xl backdrop-blur-md transition-all animate-in slide-in-from-right-4"
-          >
-            {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
-            {toast.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
-            {toast.type === 'info' && <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}
-
-            <div className="flex-1 min-w-0">
-              <h5 className="text-xs font-bold text-white">{toast.title}</h5>
-              <p className="text-[11px] text-slate-300 mt-0.5 leading-snug">{toast.message}</p>
-            </div>
-
-            <button
-              onClick={() => removeToast(toast.id)}
-              className="text-slate-500 hover:text-white transition p-0.5"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        ))}
-      </div>
+      <ToastStack />
     </div>
   );
 };

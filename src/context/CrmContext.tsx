@@ -1,15 +1,24 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { 
-  User, UserRole, Currency, Deal, Company, Contact, Lead, Task, 
-  Activity, AuditLog, EmailNotification, PipelineStage, DealAttachment 
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
+import {
+  User, UserRole, Currency, Deal, Company, Contact, Lead, Task,
+  Activity, AuditLog, EmailNotification, PipelineStage, DealAttachment
 } from '../types';
-import { 
-  INITIAL_USERS, INITIAL_COMPANIES, INITIAL_CONTACTS, 
-  INITIAL_LEADS, INITIAL_DEALS, INITIAL_TASKS, 
-  INITIAL_ACTIVITIES, INITIAL_AUDIT_LOGS 
-} from '../data/mockData';
+import { tryRestoreSession, setAccessToken } from '../api/client';
+import { authApi } from '../api/authApi';
+import { usersApi } from '../api/usersApi';
+import { companiesApi } from '../api/companiesApi';
+import { contactsApi } from '../api/contactsApi';
+import { leadsApi } from '../api/leadsApi';
+import { dealsApi } from '../api/dealsApi';
+import { tasksApi } from '../api/tasksApi';
+import { activitiesApi } from '../api/activitiesApi';
+import { auditLogsApi } from '../api/auditLogsApi';
+import { emailsApi } from '../api/emailsApi';
+import { recycleBinApi, TrashEntityType } from '../api/recycleBinApi';
+import { DEMO_PASSWORD } from '../data/demoPersonas';
 
-export type ActiveView = 
+export type ActiveView =
   | 'dashboard'
   | 'pipeline'
   | 'deals'
@@ -30,6 +39,15 @@ export interface ToastMessage {
 }
 
 interface CrmContextType {
+  // Auth
+  isAuthenticated: boolean;
+  isBootstrapping: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  register: (fullName: string, email: string, password: string, role: UserRole, department?: string) => Promise<void>;
+  logoutUser: () => Promise<void>;
+  forgotPassword: (email: string) => Promise<void>;
+  resetPassword: (token: string, newPassword: string) => Promise<void>;
+
   currentUser: User;
   users: User[];
   switchUser: (userId: string) => void;
@@ -41,7 +59,7 @@ interface CrmContextType {
   setActiveView: (view: ActiveView) => void;
   globalSearch: string;
   setGlobalSearch: (q: string) => void;
-  
+
   // Data Collections (Non-deleted)
   deals: Deal[];
   companies: Company[];
@@ -51,7 +69,7 @@ interface CrmContextType {
   activities: Activity[];
   auditLogs: AuditLog[];
   emailNotifications: EmailNotification[];
-  
+
   // Recycle Bin / Soft-deleted
   trashItems: {
     id: string;
@@ -60,48 +78,48 @@ interface CrmContextType {
     deletedAt: string;
     deletedBy: string;
   }[];
-  
+
   // Deal Operations
   updateDealStage: (dealId: string, newStage: PipelineStage, reason?: string) => void;
-  createDeal: (deal: Partial<Deal>) => Deal;
+  createDeal: (deal: Partial<Deal>) => void;
   updateDeal: (dealId: string, updates: Partial<Deal>) => void;
   softDeleteDeal: (dealId: string) => void;
-  uploadAttachment: (dealId: string, file: { name: string; size: number; type: string }) => void;
+  uploadAttachment: (dealId: string, file: File) => void;
   deleteAttachment: (dealId: string, attachmentId: string) => void;
-  
+
   // Company & Contact Operations
-  createCompany: (company: Partial<Company>) => Company;
+  createCompany: (company: Partial<Company>) => void;
   softDeleteCompany: (companyId: string) => void;
-  createContact: (contact: Partial<Contact>) => Contact;
+  createContact: (contact: Partial<Contact> & { avatar?: string }) => void;
   softDeleteContact: (contactId: string) => void;
-  
+
   // Lead Operations
-  createLead: (lead: Partial<Lead>) => Lead;
-  convertLeadToDeal: (leadId: string, dealTitle: string, dealValue: number) => Deal;
+  createLead: (lead: Partial<Lead>) => void;
+  convertLeadToDeal: (leadId: string, dealTitle: string, dealValue: number) => void;
   softDeleteLead: (leadId: string) => void;
-  
+
   // Task Operations
-  createTask: (task: Partial<Task>) => Task;
+  createTask: (task: Partial<Task>) => void;
   toggleTaskStatus: (taskId: string) => void;
   softDeleteTask: (taskId: string) => void;
-  
+
   // Activity Operations
   logActivity: (activity: Omit<Activity, 'id' | 'performedAt' | 'performedBy' | 'performedByRole'>) => void;
-  
+
   // Email Operations
   sendEmailNotification: (email: Omit<EmailNotification, 'id' | 'sentAt' | 'status'>) => void;
-  
+
   // Trash bin restore / purge
   restoreEntity: (type: 'DEAL' | 'COMPANY' | 'CONTACT' | 'LEAD' | 'TASK', id: string) => void;
   permanentlyPurgeEntity: (type: 'DEAL' | 'COMPANY' | 'CONTACT' | 'LEAD' | 'TASK', id: string) => void;
-  
+
   // UI State
   selectedDealId: string | null;
   setSelectedDealId: (id: string | null) => void;
   toasts: ToastMessage[];
   removeToast: (id: string) => void;
   showToast: (type: ToastMessage['type'], title: string, message: string) => void;
-  
+
   // Celebration trigger
   celebrationCount: number;
   triggerCelebration: () => void;
@@ -109,678 +127,417 @@ interface CrmContextType {
 
 const CrmContext = createContext<CrmContextType | undefined>(undefined);
 
-const CURRENCY_RATES = {
-  MAD: 1,
-  USD: 0.10, // 10 MAD = 1 USD
-  EUR: 0.092, // 10.87 MAD = 1 EUR
+const CURRENCY_RATES = { MAD: 1, USD: 0.10, EUR: 0.092 };
+
+const GUEST_USER: User = {
+  id: '', name: '', email: '', role: 'SALES_AGENT', avatar: '',
+  department: '', location: '', quota: 0, status: 'ACTIVE',
 };
 
 export const CrmProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
-  // Default to Manager for realistic pipeline demonstration
-  const [currentUser, setCurrentUser] = useState<User>(INITIAL_USERS[1]);
+  const queryClient = useQueryClient();
+
+  const [currentUser, setCurrentUser] = useState<User>(GUEST_USER);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+
   const [currency, setCurrency] = useState<Currency>('MAD');
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [globalSearch, setGlobalSearch] = useState<string>('');
-  
-  // Main Data States with LocalStorage persistence fallback
-  const [deals, setDeals] = useState<Deal[]>(() => {
-    const saved = localStorage.getItem('salesflow_deals');
-    return saved ? JSON.parse(saved) : INITIAL_DEALS;
-  });
-  
-  const [companies, setCompanies] = useState<Company[]>(() => {
-    const saved = localStorage.getItem('salesflow_companies');
-    return saved ? JSON.parse(saved) : INITIAL_COMPANIES;
-  });
-  
-  const [contacts, setContacts] = useState<Contact[]>(() => {
-    const saved = localStorage.getItem('salesflow_contacts');
-    return saved ? JSON.parse(saved) : INITIAL_CONTACTS;
-  });
-  
-  const [leads, setLeads] = useState<Lead[]>(() => {
-    const saved = localStorage.getItem('salesflow_leads');
-    return saved ? JSON.parse(saved) : INITIAL_LEADS;
-  });
-  
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = localStorage.getItem('salesflow_tasks');
-    return saved ? JSON.parse(saved) : INITIAL_TASKS;
-  });
-  
-  const [activities, setActivities] = useState<Activity[]>(() => {
-    const saved = localStorage.getItem('salesflow_activities');
-    return saved ? JSON.parse(saved) : INITIAL_ACTIVITIES;
-  });
-  
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem('salesflow_audit');
-    return saved ? JSON.parse(saved) : INITIAL_AUDIT_LOGS;
-  });
-  
-  const [emailNotifications, setEmailNotifications] = useState<EmailNotification[]>([]);
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [celebrationCount, setCelebrationCount] = useState<number>(0);
 
-  // Sync to local storage for persistence across reloads
-  useEffect(() => {
-    localStorage.setItem('salesflow_deals', JSON.stringify(deals));
-  }, [deals]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_companies', JSON.stringify(companies));
-  }, [companies]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_contacts', JSON.stringify(contacts));
-  }, [contacts]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_leads', JSON.stringify(leads));
-  }, [leads]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_tasks', JSON.stringify(tasks));
-  }, [tasks]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_activities', JSON.stringify(activities));
-  }, [activities]);
-  useEffect(() => {
-    localStorage.setItem('salesflow_audit', JSON.stringify(auditLogs));
-  }, [auditLogs]);
-
-  const showToast = (type: ToastMessage['type'], title: string, message: string) => {
+  const showToast = useCallback((type: ToastMessage['type'], title: string, message: string) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
     setToasts(prev => [...prev, { id, type, title, message }]);
-    setTimeout(() => {
-      removeToast(id);
-    }, 4500);
+    setTimeout(() => removeToast(id), 4500);
+  }, []);
+
+  const removeToast = (id: string) => setToasts(prev => prev.filter(t => t.id !== id));
+  const triggerCelebration = () => setCelebrationCount(c => c + 1);
+
+  // ---- Session bootstrap: try the httpOnly refresh cookie once on load ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const token = await tryRestoreSession();
+        if (token) {
+          const me = await usersApi.me();
+          setCurrentUser(me);
+          setIsAuthenticated(true);
+        }
+      } finally {
+        setIsBootstrapping(false);
+      }
+    })();
+  }, []);
+
+  // Re-fetch everything once React has re-rendered with the new currentUser/role - invalidating
+  // synchronously inside the login handler would refetch role-gated queries (dashboard, audit
+  // logs, emails) while they're still configured with the *previous* user's `enabled` flag,
+  // producing spurious 403s against endpoints the new role can't see.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    // Deferred to a macrotask so this runs after react-query's own hooks (declared further
+    // down this component) have re-subscribed with this render's `enabled` flags - otherwise
+    // invalidation can race ahead of them and refetch a query that's about to become disabled.
+    const id = setTimeout(() => queryClient.invalidateQueries(), 0);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser.id]);
+
+  const onAuthSuccess = (user: User) => {
+    setCurrentUser(user);
+    setIsAuthenticated(true);
   };
 
-  const removeToast = (id: string) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
+  const login = async (email: string, password: string) => {
+    const res = await authApi.login(email, password);
+    onAuthSuccess(res.user);
+    showToast('success', 'Logged In', `Authenticated as ${res.user.name} (${res.user.role})`);
   };
 
-  const triggerCelebration = () => {
-    setCelebrationCount(c => c + 1);
+  const register = async (fullName: string, email: string, password: string, role: UserRole, department?: string) => {
+    const res = await authApi.register(fullName, email, password, role, department);
+    onAuthSuccess(res.user);
+    showToast('success', 'Account Registered', `Welcome to SalesFlow, ${res.user.name}!`);
+  };
+
+  const logoutUser = async () => {
+    await authApi.logout();
+    setAccessToken(null);
+    setCurrentUser(GUEST_USER);
+    setIsAuthenticated(false);
+    queryClient.clear();
+  };
+
+  const forgotPassword = async (email: string) => {
+    await authApi.forgotPassword(email);
+    showToast('info', 'Password Reset Email Dispatched', `Reset instructions sent to ${email}`);
+  };
+
+  const resetPassword = async (token: string, newPassword: string) => {
+    await authApi.resetPassword(token, newPassword);
+    showToast('success', 'Password Updated', 'You can now sign in with your new password');
+  };
+
+  // "Portfolio testing" convenience: re-authenticate as a known demo account.
+  const switchUser = async (userId: string) => {
+    const target = users.find(u => u.id === userId);
+    if (!target) return;
+    await login(target.email, DEMO_PASSWORD);
+  };
+
+  const switchRole = async (role: UserRole) => {
+    const target = users.find(u => u.role === role);
+    if (!target) {
+      showToast('warning', 'No Demo Account', `No seeded account with role ${role}`);
+      return;
+    }
+    await login(target.email, DEMO_PASSWORD);
   };
 
   const formatMoney = (amountInMad: number): string => {
     const rate = CURRENCY_RATES[currency];
     const converted = amountInMad * rate;
-    
-    if (currency === 'MAD') {
-      return `${Math.round(converted).toLocaleString('fr-MA')} MAD`;
-    }
-    if (currency === 'USD') {
-      return `$${Math.round(converted).toLocaleString('en-US')}`;
-    }
+    if (currency === 'MAD') return `${Math.round(converted).toLocaleString('fr-MA')} MAD`;
+    if (currency === 'USD') return `$${Math.round(converted).toLocaleString('en-US')}`;
     return `€${Math.round(converted).toLocaleString('fr-FR')}`;
   };
 
-  const switchUser = (userId: string) => {
-    const found = users.find(u => u.id === userId);
-    if (found) {
-      setCurrentUser(found);
-      showToast('info', 'Switched User Profile', `Now authenticated as ${found.name} (${found.role})`);
-      
-      // Log login audit
-      const log: AuditLog = {
-        id: `aud-${Date.now()}`,
-        entityType: 'USER',
-        entityId: found.id,
-        entityName: found.name,
-        action: 'AUTH_LOGIN',
-        userId: found.id,
-        userName: found.name,
-        userRole: found.role,
-        userIp: '196.200.145.42 (Casablanca, MA)',
-        timestamp: new Date().toISOString(),
-        details: `Switched authentication identity to ${found.name} [${found.role}]`,
-      };
-      setAuditLogs(prev => [log, ...prev]);
-    }
-  };
+  // ---------------------------------------------------------------------
+  // Queries - flat, reasonably-sized windows (the API itself fully supports
+  // server-side pagination/filtering/sorting/search; these list views were
+  // designed around an in-memory array, so we fetch a generous page once and
+  // let the existing client-side table/filter UI keep working unchanged).
+  // ---------------------------------------------------------------------
+  const enabled = isAuthenticated;
 
-  const switchRole = (role: UserRole) => {
-    const userWithRole = users.find(u => u.role === role) || {
-      ...currentUser,
-      role
-    };
-    setCurrentUser(userWithRole);
-    showToast('info', 'Role Switch Applied', `Active security role changed to ${role}`);
-  };
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: usersApi.list, enabled });
+  const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: () => companiesApi.list(), enabled });
+  const contactsQuery = useQuery({ queryKey: ['contacts'], queryFn: () => contactsApi.list(), enabled });
+  const leadsQuery = useQuery({ queryKey: ['leads'], queryFn: () => leadsApi.list(), enabled });
+  const dealsQuery = useQuery({ queryKey: ['deals'], queryFn: () => dealsApi.list(), enabled });
+  const tasksQuery = useQuery({ queryKey: ['tasks'], queryFn: () => tasksApi.list(), enabled });
+  const activitiesQuery = useQuery({ queryKey: ['activities'], queryFn: activitiesApi.listAll, enabled });
+  const auditLogsQuery = useQuery({ queryKey: ['auditLogs'], queryFn: auditLogsApi.list, enabled: enabled && currentUser.role === 'ADMIN' });
+  const emailsQuery = useQuery({ queryKey: ['emails'], queryFn: emailsApi.list, enabled: enabled && currentUser.role === 'ADMIN' });
+  const trashQuery = useQuery({ queryKey: ['trash'], queryFn: recycleBinApi.list, enabled });
 
-  const recordAudit = (
-    action: AuditLog['action'], 
-    entityType: string, 
-    entityId: string, 
-    entityName: string, 
-    details: string,
-    changes?: { field: string; before: string; after: string }[]
-  ) => {
-    const newLog: AuditLog = {
-      id: `aud-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      entityType,
-      entityId,
-      entityName,
-      action,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      userRole: currentUser.role,
-      userIp: '196.200.145.42 (Casablanca, MA)',
-      timestamp: new Date().toISOString(),
-      details,
-      changes,
-    };
-    setAuditLogs(prev => [newLog, ...prev]);
-  };
+  const users = usersQuery.data ?? [];
+  const companies = (companiesQuery.data?.content ?? []);
+  const contacts = (contactsQuery.data?.content ?? []);
+  const leads = (leadsQuery.data?.content ?? []);
+  const deals = (dealsQuery.data?.content ?? []);
+  const tasks = (tasksQuery.data?.content ?? []);
+  const activities = activitiesQuery.data ?? [];
+  const auditLogs = auditLogsQuery.data ?? [];
+  const emailNotifications = emailsQuery.data ?? [];
+  const trashItems = trashQuery.data ?? [];
 
-  // DEAL OPERATIONS
-  const updateDealStage = (dealId: string, newStage: PipelineStage, reason?: string) => {
-    const deal = deals.find(d => d.id === dealId);
-    if (!deal) return;
+  const invalidate = (...keys: string[]) => keys.forEach(k => queryClient.invalidateQueries({ queryKey: [k] }));
 
-    const oldStage = deal.stage;
-    if (oldStage === newStage) return;
-
-    let newProb = 50;
-    if (newStage === 'NEW_LEAD') newProb = 10;
-    else if (newStage === 'CONTACTED') newProb = 25;
-    else if (newStage === 'QUALIFIED') newProb = 50;
-    else if (newStage === 'PROPOSAL') newProb = 70;
-    else if (newStage === 'NEGOTIATION') newProb = 85;
-    else if (newStage === 'WON') newProb = 100;
-    else if (newStage === 'LOST') newProb = 0;
-
-    const updatedDeals = deals.map(d => {
-      if (d.id === dealId) {
+  // ---------------------------------------------------------------------
+  // Deal mutations
+  // ---------------------------------------------------------------------
+  const updateDealStageMutation = useMutation({
+    mutationFn: ({ dealId, newStage, reason }: { dealId: string; newStage: PipelineStage; reason?: string }) =>
+      dealsApi.updateStage(dealId, newStage, reason),
+    onMutate: async ({ dealId, newStage }) => {
+      await queryClient.cancelQueries({ queryKey: ['deals'] });
+      const previous = queryClient.getQueryData(['deals']);
+      queryClient.setQueryData(['deals'], (old: any) => {
+        if (!old) return old;
         return {
-          ...d,
-          stage: newStage,
-          probability: newProb,
-          wonLostReason: reason || d.wonLostReason,
-          updatedAt: new Date().toISOString(),
-          lastActivityDate: new Date().toISOString(),
+          ...old,
+          content: old.content.map((d: Deal) => d.id === dealId ? { ...d, stage: newStage } : d),
         };
-      }
-      return d;
-    });
-
-    setDeals(updatedDeals);
-
-    // Activity record
-    const newActivity: Activity = {
-      id: `act-${Date.now()}`,
-      entityType: 'DEAL',
-      entityId: deal.id,
-      entityTitle: deal.title,
-      type: 'STAGE_CHANGE',
-      title: newStage === 'WON' ? '🎉 Deal Won!' : `Moved to ${newStage.replace('_', ' ')}`,
-      description: reason ? `Reason: ${reason}` : `Stage updated from ${oldStage} to ${newStage}`,
-      performedBy: currentUser.name,
-      performedByRole: currentUser.role,
-      performedAt: new Date().toISOString(),
-      outcome: `Probability updated to ${newProb}%`,
-    };
-    setActivities(prev => [newActivity, ...prev]);
-
-    // Audit log
-    recordAudit(
-      'STAGE_CHANGE',
-      'DEAL',
-      deal.id,
-      deal.title,
-      `Updated pipeline stage to ${newStage}${reason ? ` (Reason: ${reason})` : ''}`,
-      [
-        { field: 'stage', before: oldStage, after: newStage },
-        { field: 'probability', before: `${deal.probability}%`, after: `${newProb}%` }
-      ]
-    );
-
-    // Email trigger simulation
-    if (newStage === 'WON') {
-      triggerCelebration();
-      showToast('success', 'Deal Closed Won!', `Congratulations! ${deal.title} won for ${formatMoney(deal.value)}`);
-      sendEmailNotification({
-        recipientEmail: deal.contactEmail,
-        recipientName: deal.contactName,
-        subject: `Partnership Confirmed: ${deal.title}`,
-        templateType: 'DEAL_WON',
-        content: `Dear ${deal.contactName}, we are thrilled to formally confirm our enterprise agreement for ${deal.title}. Our implementation team in Casablanca is preparing your onboarding kickoff.`
       });
-    } else {
-      showToast('info', 'Deal Updated', `${deal.title} moved to ${newStage.replace('_', ' ')}`);
-    }
-  };
-
-  const createDeal = (dealData: Partial<Deal>): Deal => {
-    const newDeal: Deal = {
-      id: `deal-${Date.now()}`,
-      title: dealData.title || 'Untitled Deal',
-      companyId: dealData.companyId || 'comp-1',
-      companyName: dealData.companyName || 'Attijari Solutions Cloud',
-      contactId: dealData.contactId || 'cont-1',
-      contactName: dealData.contactName || 'Mehdi Mansouri',
-      contactEmail: dealData.contactEmail || 'm.mansouri@attijari-cloud.ma',
-      value: dealData.value || 100000,
-      currency: dealData.currency || 'MAD',
-      stage: dealData.stage || 'NEW_LEAD',
-      probability: dealData.probability || 10,
-      expectedCloseDate: dealData.expectedCloseDate || new Date(Date.now() + 60 * 86400000).toISOString().split('T')[0],
-      assignedAgentId: dealData.assignedAgentId || currentUser.id,
-      assignedAgentName: dealData.assignedAgentName || currentUser.name,
-      priority: dealData.priority || 'MEDIUM',
-      tags: dealData.tags || ['Enterprise'],
-      attachments: [],
-      notesCount: 0,
-      lastActivityDate: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-
-    setDeals(prev => [newDeal, ...prev]);
-
-    recordAudit('CREATE', 'DEAL', newDeal.id, newDeal.title, `Created new deal valued at ${newDeal.value} MAD`);
-    showToast('success', 'Deal Created', `${newDeal.title} has been added to pipeline`);
-
-    return newDeal;
-  };
-
-  const updateDeal = (dealId: string, updates: Partial<Deal>) => {
-    setDeals(prev => prev.map(d => {
-      if (d.id === dealId) {
-        return {
-          ...d,
-          ...updates,
-          updatedAt: new Date().toISOString()
-        };
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(['deals'], context.previous);
+      showToast('error', 'Update Failed', 'Could not update the deal stage');
+    },
+    onSuccess: (updated, { newStage }) => {
+      invalidate('deals', 'activities', 'auditLogs');
+      if (newStage === 'WON') {
+        triggerCelebration();
+        showToast('success', 'Deal Closed Won!', `Congratulations! ${updated.title} won for ${formatMoney(updated.value)}`);
+      } else {
+        showToast('info', 'Deal Updated', `${updated.title} moved to ${newStage.replace('_', ' ')}`);
       }
-      return d;
-    }));
-    recordAudit('UPDATE', 'DEAL', dealId, updates.title || 'Deal', 'Updated deal metadata & details');
-    showToast('info', 'Saved Changes', 'Deal properties updated successfully');
-  };
+    },
+  });
+  const updateDealStage = (dealId: string, newStage: PipelineStage, reason?: string) =>
+    updateDealStageMutation.mutate({ dealId, newStage, reason });
 
-  const softDeleteDeal = (dealId: string) => {
-    const target = deals.find(d => d.id === dealId);
-    if (!target) return;
+  const createDealMutation = useMutation({
+    mutationFn: (deal: Partial<Deal>) => dealsApi.create(deal as Record<string, unknown>),
+    onSuccess: (created) => {
+      invalidate('deals', 'auditLogs');
+      showToast('success', 'Deal Created', `${created.title} has been added to pipeline`);
+    },
+    onError: () => showToast('error', 'Create Failed', 'Could not create the deal'),
+  });
+  const createDeal = (deal: Partial<Deal>) => createDealMutation.mutate(deal);
 
-    setDeals(prev => prev.map(d => d.id === dealId ? { ...d, deletedAt: new Date().toISOString() } : d));
-    recordAudit('SOFT_DELETE', 'DEAL', dealId, target.title, 'Soft-deleted deal (moved to Recycle Bin)');
-    showToast('warning', 'Moved to Trash', `${target.title} moved to Recycle Bin (can be restored by Admin)`);
-  };
+  const updateDealMutation = useMutation({
+    mutationFn: ({ dealId, updates }: { dealId: string; updates: Partial<Deal> }) =>
+      dealsApi.update(dealId, updates as Record<string, unknown>),
+    onSuccess: () => {
+      invalidate('deals', 'auditLogs');
+      showToast('info', 'Saved Changes', 'Deal properties updated successfully');
+    },
+  });
+  const updateDeal = (dealId: string, updates: Partial<Deal>) => updateDealMutation.mutate({ dealId, updates });
 
-  const uploadAttachment = (dealId: string, file: { name: string; size: number; type: string }) => {
-    const newAtt: DealAttachment = {
-      id: `att-${Date.now()}`,
-      dealId,
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: file.type || 'application/pdf',
-      uploadedBy: currentUser.name,
-      uploadedAt: new Date().toISOString(),
-    };
+  const softDeleteDealMutation = useMutation({
+    mutationFn: (dealId: string) => dealsApi.remove(dealId),
+    onSuccess: (_r, dealId) => {
+      const target = deals.find(d => d.id === dealId);
+      invalidate('deals', 'trash', 'auditLogs');
+      showToast('warning', 'Moved to Trash', `${target?.title ?? 'Deal'} moved to Recycle Bin (can be restored by Admin)`);
+    },
+  });
+  const softDeleteDeal = (dealId: string) => softDeleteDealMutation.mutate(dealId);
 
-    setDeals(prev => prev.map(d => {
-      if (d.id === dealId) {
-        return {
-          ...d,
-          attachments: [newAtt, ...d.attachments],
-          updatedAt: new Date().toISOString()
-        };
-      }
-      return d;
-    }));
+  const uploadAttachmentMutation = useMutation({
+    mutationFn: ({ dealId, file }: { dealId: string; file: File }) => dealsApi.uploadAttachment(dealId, file),
+    onSuccess: (_r, { file }) => {
+      invalidate('deals', 'auditLogs');
+      showToast('success', 'File Uploaded', `${file.name} attached to deal`);
+    },
+    onError: () => showToast('error', 'Upload Failed', 'Could not upload the file'),
+  });
+  const uploadAttachment = (dealId: string, file: File) => uploadAttachmentMutation.mutate({ dealId, file });
 
-    recordAudit('FILE_UPLOAD', 'FILE', newAtt.id, newAtt.fileName, `Uploaded file to deal #${dealId}`);
-    showToast('success', 'File Uploaded', `${file.name} attached to deal`);
-  };
+  const deleteAttachmentMutation = useMutation({
+    mutationFn: ({ dealId, attachmentId }: { dealId: string; attachmentId: string }) =>
+      dealsApi.deleteAttachment(dealId, attachmentId),
+    onSuccess: () => {
+      invalidate('deals');
+      showToast('info', 'File Removed', 'Attachment deleted');
+    },
+  });
+  const deleteAttachment = (dealId: string, attachmentId: string) => deleteAttachmentMutation.mutate({ dealId, attachmentId });
 
-  const deleteAttachment = (dealId: string, attachmentId: string) => {
-    setDeals(prev => prev.map(d => {
-      if (d.id === dealId) {
-        return {
-          ...d,
-          attachments: d.attachments.filter(a => a.id !== attachmentId),
-          updatedAt: new Date().toISOString()
-        };
-      }
-      return d;
-    }));
-    showToast('info', 'File Removed', 'Attachment deleted');
-  };
+  // ---------------------------------------------------------------------
+  // Company mutations
+  // ---------------------------------------------------------------------
+  const createCompanyMutation = useMutation({
+    mutationFn: (company: Partial<Company>) => companiesApi.create(company),
+    onSuccess: (created) => {
+      invalidate('companies', 'auditLogs');
+      showToast('success', 'Company Created', `${created.name} added to CRM`);
+    },
+  });
+  const createCompany = (company: Partial<Company>) => createCompanyMutation.mutate(company);
 
-  // COMPANY OPERATIONS
-  const createCompany = (companyData: Partial<Company>): Company => {
-    const newComp: Company = {
-      id: `comp-${Date.now()}`,
-      name: companyData.name || 'New Enterprise Client',
-      industry: companyData.industry || 'Technology & Software',
-      website: companyData.website || 'https://client.ma',
-      phone: companyData.phone || '+212 522 000000',
-      city: companyData.city || 'Casablanca',
-      country: companyData.country || 'Morocco',
-      annualRevenue: companyData.annualRevenue || 10000000,
-      employeeCount: companyData.employeeCount || 50,
-      status: companyData.status || 'ACTIVE',
-      contactsCount: 0,
-      activeDealsCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setCompanies(prev => [newComp, ...prev]);
-    recordAudit('CREATE', 'COMPANY', newComp.id, newComp.name, 'Created new enterprise company record');
-    showToast('success', 'Company Created', `${newComp.name} added to CRM`);
-    return newComp;
-  };
+  const softDeleteCompanyMutation = useMutation({
+    mutationFn: (companyId: string) => companiesApi.remove(companyId),
+    onSuccess: (_r, companyId) => {
+      const target = companies.find(c => c.id === companyId);
+      invalidate('companies', 'trash', 'auditLogs');
+      showToast('warning', 'Moved to Trash', `${target?.name ?? 'Company'} moved to Recycle Bin`);
+    },
+  });
+  const softDeleteCompany = (companyId: string) => softDeleteCompanyMutation.mutate(companyId);
 
-  const softDeleteCompany = (companyId: string) => {
-    const target = companies.find(c => c.id === companyId);
-    if (!target) return;
-    setCompanies(prev => prev.map(c => c.id === companyId ? { ...c, deletedAt: new Date().toISOString() } : c));
-    recordAudit('SOFT_DELETE', 'COMPANY', companyId, target.name, 'Soft-deleted company record');
-    showToast('warning', 'Moved to Trash', `${target.name} moved to Recycle Bin`);
-  };
+  // ---------------------------------------------------------------------
+  // Contact mutations
+  // ---------------------------------------------------------------------
+  const createContactMutation = useMutation({
+    mutationFn: (contact: Partial<Contact> & { avatar?: string }) => contactsApi.create(contact),
+    onSuccess: (created) => {
+      invalidate('contacts', 'companies', 'auditLogs');
+      showToast('success', 'Contact Created', `${created.firstName} ${created.lastName} added`);
+    },
+  });
+  const createContact = (contact: Partial<Contact> & { avatar?: string }) => createContactMutation.mutate(contact);
 
-  // CONTACT OPERATIONS
-  const createContact = (contactData: Partial<Contact>): Contact => {
-    const newContact: Contact = {
-      id: `cont-${Date.now()}`,
-      companyId: contactData.companyId || 'comp-1',
-      companyName: contactData.companyName || 'Attijari Solutions Cloud',
-      firstName: contactData.firstName || 'Anas',
-      lastName: contactData.lastName || 'El Fassi',
-      email: contactData.email || 'a.elfassi@company.ma',
-      phone: contactData.phone || '+212 660 000000',
-      jobTitle: contactData.jobTitle || 'Account Executive',
-      avatar: contactData.avatar || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150',
-      status: 'ACTIVE',
-      totalDealValue: 0,
-      notesCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setContacts(prev => [newContact, ...prev]);
-    recordAudit('CREATE', 'CONTACT', newContact.id, `${newContact.firstName} ${newContact.lastName}`, 'Created contact');
-    showToast('success', 'Contact Created', `${newContact.firstName} ${newContact.lastName} added`);
-    return newContact;
-  };
+  const softDeleteContactMutation = useMutation({
+    mutationFn: (contactId: string) => contactsApi.remove(contactId),
+    onSuccess: () => {
+      invalidate('contacts', 'companies', 'trash', 'auditLogs');
+      showToast('warning', 'Moved to Trash', 'Contact moved to Recycle Bin');
+    },
+  });
+  const softDeleteContact = (contactId: string) => softDeleteContactMutation.mutate(contactId);
 
-  const softDeleteContact = (contactId: string) => {
-    const target = contacts.find(c => c.id === contactId);
-    if (!target) return;
-    setContacts(prev => prev.map(c => c.id === contactId ? { ...c, deletedAt: new Date().toISOString() } : c));
-    recordAudit('SOFT_DELETE', 'CONTACT', contactId, `${target.firstName} ${target.lastName}`, 'Soft-deleted contact');
-    showToast('warning', 'Moved to Trash', 'Contact moved to Recycle Bin');
-  };
+  // ---------------------------------------------------------------------
+  // Lead mutations
+  // ---------------------------------------------------------------------
+  const createLeadMutation = useMutation({
+    mutationFn: (lead: Partial<Lead>) => leadsApi.create(lead),
+    onSuccess: (created) => {
+      invalidate('leads', 'auditLogs');
+      showToast('success', 'Lead Added', `${created.title} registered`);
+    },
+  });
+  const createLead = (lead: Partial<Lead>) => createLeadMutation.mutate(lead);
 
-  // LEAD OPERATIONS
-  const createLead = (leadData: Partial<Lead>): Lead => {
-    const newLead: Lead = {
-      id: `lead-${Date.now()}`,
-      title: leadData.title || 'Inbound Enterprise Lead',
-      company: leadData.company || 'Enterprise Prospect',
-      contactName: leadData.contactName || 'Lead Contact',
-      email: leadData.email || 'contact@lead.ma',
-      phone: leadData.phone || '+212 660 000000',
-      source: leadData.source || 'CASABLANCA_TECH_EXPO',
-      score: leadData.score || 70,
-      status: leadData.status || 'NEW',
-      estimatedValue: leadData.estimatedValue || 150000,
-      assignedAgentId: leadData.assignedAgentId || currentUser.id,
-      assignedAgentName: leadData.assignedAgentName || currentUser.name,
-      city: leadData.city || 'Casablanca',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setLeads(prev => [newLead, ...prev]);
-    recordAudit('CREATE', 'LEAD', newLead.id, newLead.title, `Created lead score ${newLead.score}/100`);
-    showToast('success', 'Lead Added', `${newLead.title} registered`);
-    return newLead;
-  };
+  const convertLeadToDealMutation = useMutation({
+    mutationFn: ({ leadId, dealTitle, dealValue }: { leadId: string; dealTitle: string; dealValue: number }) =>
+      leadsApi.convertToDeal(leadId, dealTitle, dealValue),
+    onSuccess: () => {
+      invalidate('leads', 'deals', 'companies', 'contacts', 'auditLogs');
+      showToast('success', 'Lead Converted!', 'Successfully converted to an active deal');
+    },
+  });
+  const convertLeadToDeal = (leadId: string, dealTitle: string, dealValue: number) =>
+    convertLeadToDealMutation.mutate({ leadId, dealTitle, dealValue });
 
-  const convertLeadToDeal = (leadId: string, dealTitle: string, dealValue: number): Deal => {
-    const lead = leads.find(l => l.id === leadId);
-    if (!lead) throw new Error('Lead not found');
+  const softDeleteLeadMutation = useMutation({
+    mutationFn: (leadId: string) => leadsApi.remove(leadId),
+    onSuccess: () => {
+      invalidate('leads', 'trash', 'auditLogs');
+      showToast('warning', 'Moved to Trash', 'Lead moved to Recycle Bin');
+    },
+  });
+  const softDeleteLead = (leadId: string) => softDeleteLeadMutation.mutate(leadId);
 
-    // Create deal from lead
-    const createdDeal = createDeal({
-      title: dealTitle || lead.title,
-      companyName: lead.company,
-      contactName: lead.contactName,
-      contactEmail: lead.email,
-      value: dealValue || lead.estimatedValue,
-      stage: 'QUALIFIED',
-      probability: 50,
-      assignedAgentId: lead.assignedAgentId,
-      assignedAgentName: lead.assignedAgentName,
-      tags: ['Converted Lead', lead.source]
-    });
+  // ---------------------------------------------------------------------
+  // Task mutations
+  // ---------------------------------------------------------------------
+  const createTaskMutation = useMutation({
+    mutationFn: (task: Partial<Task>) => tasksApi.create(task),
+    onSuccess: (created) => {
+      invalidate('tasks', 'auditLogs');
+      showToast('success', 'Task Scheduled', created.title);
+    },
+  });
+  const createTask = (task: Partial<Task>) => createTaskMutation.mutate(task);
 
-    // Mark lead as qualified
-    setLeads(prev => prev.map(l => l.id === leadId ? { ...l, status: 'QUALIFIED', updatedAt: new Date().toISOString() } : l));
+  const toggleTaskStatusMutation = useMutation({
+    mutationFn: (taskId: string) => tasksApi.toggleStatus(taskId),
+    onSuccess: () => invalidate('tasks', 'auditLogs'),
+  });
+  const toggleTaskStatus = (taskId: string) => toggleTaskStatusMutation.mutate(taskId);
 
-    recordAudit('UPDATE', 'LEAD', leadId, lead.title, `Converted lead into active Deal #${createdDeal.id}`);
-    showToast('success', 'Lead Converted!', `Successfully converted to Deal: ${createdDeal.title}`);
-    return createdDeal;
-  };
+  const softDeleteTaskMutation = useMutation({
+    mutationFn: (taskId: string) => tasksApi.remove(taskId),
+    onSuccess: () => {
+      invalidate('tasks', 'trash', 'auditLogs');
+      showToast('warning', 'Task Deleted', 'Moved to Recycle Bin');
+    },
+  });
+  const softDeleteTask = (taskId: string) => softDeleteTaskMutation.mutate(taskId);
 
-  const softDeleteLead = (leadId: string) => {
-    const target = leads.find(l => l.id === leadId);
-    if (!target) return;
-    setLeads(prev => prev.map(l => l.id === leadId ? { ...l, deletedAt: new Date().toISOString() } : l));
-    recordAudit('SOFT_DELETE', 'LEAD', leadId, target.title, 'Soft-deleted lead record');
-    showToast('warning', 'Moved to Trash', 'Lead moved to Recycle Bin');
-  };
+  // ---------------------------------------------------------------------
+  // Activity / Email
+  // ---------------------------------------------------------------------
+  const logActivityMutation = useMutation({
+    mutationFn: (activity: Omit<Activity, 'id' | 'performedAt' | 'performedBy' | 'performedByRole'>) =>
+      activitiesApi.create(activity),
+    onSuccess: (created) => {
+      invalidate('activities');
+      showToast('info', 'Activity Logged', created.title);
+    },
+  });
+  const logActivity = (activity: Omit<Activity, 'id' | 'performedAt' | 'performedBy' | 'performedByRole'>) =>
+    logActivityMutation.mutate(activity);
 
-  // TASK OPERATIONS
-  const createTask = (taskData: Partial<Task>): Task => {
-    const newTask: Task = {
-      id: `task-${Date.now()}`,
-      title: taskData.title || 'Follow up with client',
-      description: taskData.description || '',
-      dealId: taskData.dealId,
-      dealTitle: taskData.dealTitle,
-      contactId: taskData.contactId,
-      contactName: taskData.contactName,
-      assignedAgentId: taskData.assignedAgentId || currentUser.id,
-      assignedAgentName: taskData.assignedAgentName || currentUser.name,
-      dueDate: taskData.dueDate || new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0],
-      priority: taskData.priority || 'MEDIUM',
-      status: 'PENDING',
-      createdAt: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setTasks(prev => [newTask, ...prev]);
-    recordAudit('CREATE', 'TASK', newTask.id, newTask.title, 'Created scheduled sales task');
-    showToast('success', 'Task Scheduled', newTask.title);
-    return newTask;
-  };
+  const sendEmailNotificationMutation = useMutation({
+    mutationFn: (email: Omit<EmailNotification, 'id' | 'sentAt' | 'status'>) => emailsApi.send(email),
+    onSuccess: (_r, email) => {
+      invalidate('emails');
+      showToast('success', 'Email Dispatched', `Sent "${email.subject}" to ${email.recipientEmail}`);
+    },
+  });
+  const sendEmailNotification = (email: Omit<EmailNotification, 'id' | 'sentAt' | 'status'>) =>
+    sendEmailNotificationMutation.mutate(email);
 
-  const toggleTaskStatus = (taskId: string) => {
-    setTasks(prev => prev.map(t => {
-      if (t.id === taskId) {
-        const nextStatus = t.status === 'COMPLETED' ? 'PENDING' : 'COMPLETED';
-        const completedAt = nextStatus === 'COMPLETED' ? new Date().toISOString() : undefined;
-        recordAudit('UPDATE', 'TASK', t.id, t.title, `Toggled status to ${nextStatus}`, [
-          { field: 'status', before: t.status, after: nextStatus }
-        ]);
-        return { ...t, status: nextStatus, completedAt };
-      }
-      return t;
-    }));
-  };
+  // ---------------------------------------------------------------------
+  // Recycle bin
+  // ---------------------------------------------------------------------
+  const restoreEntityMutation = useMutation({
+    mutationFn: ({ type, id }: { type: TrashEntityType; id: string }) => recycleBinApi.restore(type, id),
+    onSuccess: (_r, { type }) => {
+      invalidate('trash', 'deals', 'companies', 'contacts', 'leads', 'tasks', 'auditLogs');
+      showToast('success', 'Record Restored', `Restored ${type} back to active pipeline`);
+    },
+  });
+  const restoreEntity = (type: 'DEAL' | 'COMPANY' | 'CONTACT' | 'LEAD' | 'TASK', id: string) =>
+    restoreEntityMutation.mutate({ type, id });
 
-  const softDeleteTask = (taskId: string) => {
-    const target = tasks.find(t => t.id === taskId);
-    if (!target) return;
-    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, deletedAt: new Date().toISOString() } : t));
-    recordAudit('SOFT_DELETE', 'TASK', taskId, target.title, 'Soft-deleted task');
-    showToast('warning', 'Task Deleted', 'Moved to Recycle Bin');
-  };
-
-  // ACTIVITY LOGGING
-  const logActivity = (activity: Omit<Activity, 'id' | 'performedAt' | 'performedBy' | 'performedByRole'>) => {
-    const newAct: Activity = {
-      ...activity,
-      id: `act-${Date.now()}`,
-      performedBy: currentUser.name,
-      performedByRole: currentUser.role,
-      performedAt: new Date().toISOString(),
-    };
-    setActivities(prev => [newAct, ...prev]);
-    recordAudit('CREATE', 'ACTIVITY', newAct.id, newAct.title, `Logged ${newAct.type} on ${newAct.entityType}`);
-    showToast('info', 'Activity Logged', newAct.title);
-  };
-
-  // EMAIL NOTIFICATION SENDER
-  const sendEmailNotification = (email: Omit<EmailNotification, 'id' | 'sentAt' | 'status'>) => {
-    const newNotification: EmailNotification = {
-      ...email,
-      id: `email-${Date.now()}`,
-      sentAt: new Date().toISOString(),
-      status: 'DELIVERED',
-    };
-    setEmailNotifications(prev => [newNotification, ...prev]);
-    showToast('success', 'Email Dispatched', `Sent "${email.subject}" to ${email.recipientEmail}`);
-  };
-
-  // TRASH / SOFT DELETE RESTORE & PERMANENT PURGE
-  const trashItems = [
-    ...deals.filter(d => d.deletedAt !== null).map(d => ({
-      id: d.id,
-      type: 'DEAL' as const,
-      name: d.title,
-      deletedAt: d.deletedAt!,
-      deletedBy: 'Current User'
-    })),
-    ...companies.filter(c => c.deletedAt !== null).map(c => ({
-      id: c.id,
-      type: 'COMPANY' as const,
-      name: c.name,
-      deletedAt: c.deletedAt!,
-      deletedBy: 'Current User'
-    })),
-    ...contacts.filter(c => c.deletedAt !== null).map(c => ({
-      id: c.id,
-      type: 'CONTACT' as const,
-      name: `${c.firstName} ${c.lastName}`,
-      deletedAt: c.deletedAt!,
-      deletedBy: 'Current User'
-    })),
-    ...leads.filter(l => l.deletedAt !== null).map(l => ({
-      id: l.id,
-      type: 'LEAD' as const,
-      name: l.title,
-      deletedAt: l.deletedAt!,
-      deletedBy: 'Current User'
-    })),
-    ...tasks.filter(t => t.deletedAt !== null).map(t => ({
-      id: t.id,
-      type: 'TASK' as const,
-      name: t.title,
-      deletedAt: t.deletedAt!,
-      deletedBy: 'Current User'
-    }))
-  ];
-
-  const restoreEntity = (type: 'DEAL' | 'COMPANY' | 'CONTACT' | 'LEAD' | 'TASK', id: string) => {
-    if (type === 'DEAL') {
-      setDeals(prev => prev.map(d => d.id === id ? { ...d, deletedAt: null } : d));
-    } else if (type === 'COMPANY') {
-      setCompanies(prev => prev.map(c => c.id === id ? { ...c, deletedAt: null } : c));
-    } else if (type === 'CONTACT') {
-      setContacts(prev => prev.map(c => c.id === id ? { ...c, deletedAt: null } : c));
-    } else if (type === 'LEAD') {
-      setLeads(prev => prev.map(l => l.id === id ? { ...l, deletedAt: null } : l));
-    } else if (type === 'TASK') {
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, deletedAt: null } : t));
-    }
-    recordAudit('RESTORE', type, id, `Entity #${id}`, `Restored soft-deleted ${type} record`);
-    showToast('success', 'Record Restored', `Restored ${type} back to active pipeline`);
-  };
-
+  const permanentlyPurgeEntityMutation = useMutation({
+    mutationFn: ({ type, id }: { type: TrashEntityType; id: string }) => recycleBinApi.purge(type, id),
+    onSuccess: () => {
+      invalidate('trash', 'auditLogs');
+      showToast('info', 'Permanently Purged', 'Record purged from the database');
+    },
+    onError: () => showToast('error', 'Permission Denied', 'Only ADMIN role can permanently purge records'),
+  });
   const permanentlyPurgeEntity = (type: 'DEAL' | 'COMPANY' | 'CONTACT' | 'LEAD' | 'TASK', id: string) => {
     if (currentUser.role !== 'ADMIN') {
       showToast('error', 'Permission Denied', 'Only ADMIN role can permanently purge records from database');
       return;
     }
-
-    if (type === 'DEAL') {
-      setDeals(prev => prev.filter(d => d.id !== id));
-    } else if (type === 'COMPANY') {
-      setCompanies(prev => prev.filter(c => c.id !== id));
-    } else if (type === 'CONTACT') {
-      setContacts(prev => prev.filter(c => c.id !== id));
-    } else if (type === 'LEAD') {
-      setLeads(prev => prev.filter(l => l.id !== id));
-    } else if (type === 'TASK') {
-      setTasks(prev => prev.filter(t => t.id !== id));
-    }
-    recordAudit('PERMANENT_DELETE', type, id, `Entity #${id}`, `Hard deleted record permanently (SQL DELETE)`);
-    showToast('info', 'Permanently Purged', `Record purged from PostgreSQL database`);
+    permanentlyPurgeEntityMutation.mutate({ type, id });
   };
-
-  // Active items (excluding soft-deleted)
-  const activeDeals = deals.filter(d => d.deletedAt === null);
-  const activeCompanies = companies.filter(c => c.deletedAt === null);
-  const activeContacts = contacts.filter(c => c.deletedAt === null);
-  const activeLeads = leads.filter(l => l.deletedAt === null);
-  const activeTasks = tasks.filter(t => t.deletedAt === null);
 
   return (
     <CrmContext.Provider
       value={{
-        currentUser,
-        users,
-        switchUser,
-        switchRole,
-        currency,
-        setCurrency,
-        formatMoney,
-        activeView,
-        setActiveView,
-        globalSearch,
-        setGlobalSearch,
-        deals: activeDeals,
-        companies: activeCompanies,
-        contacts: activeContacts,
-        leads: activeLeads,
-        tasks: activeTasks,
-        activities,
-        auditLogs,
-        emailNotifications,
+        isAuthenticated, isBootstrapping, login, register, logoutUser, forgotPassword, resetPassword,
+        currentUser, users, switchUser, switchRole,
+        currency, setCurrency, formatMoney,
+        activeView, setActiveView, globalSearch, setGlobalSearch,
+        deals, companies, contacts, leads, tasks, activities, auditLogs, emailNotifications,
         trashItems,
-        updateDealStage,
-        createDeal,
-        updateDeal,
-        softDeleteDeal,
-        uploadAttachment,
-        deleteAttachment,
-        createCompany,
-        softDeleteCompany,
-        createContact,
-        softDeleteContact,
-        createLead,
-        convertLeadToDeal,
-        softDeleteLead,
-        createTask,
-        toggleTaskStatus,
-        softDeleteTask,
+        updateDealStage, createDeal, updateDeal, softDeleteDeal, uploadAttachment, deleteAttachment,
+        createCompany, softDeleteCompany,
+        createContact, softDeleteContact,
+        createLead, convertLeadToDeal, softDeleteLead,
+        createTask, toggleTaskStatus, softDeleteTask,
         logActivity,
         sendEmailNotification,
-        restoreEntity,
-        permanentlyPurgeEntity,
-        selectedDealId,
-        setSelectedDealId,
-        toasts,
-        removeToast,
-        showToast,
-        celebrationCount,
-        triggerCelebration,
+        restoreEntity, permanentlyPurgeEntity,
+        selectedDealId, setSelectedDealId,
+        toasts, removeToast, showToast,
+        celebrationCount, triggerCelebration,
       }}
     >
       {children}

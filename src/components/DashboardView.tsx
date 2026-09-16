@@ -1,60 +1,78 @@
 import React, { useState } from 'react';
-import { 
-  TrendingUp, DollarSign, Award, Target, AlertCircle, ArrowUpRight, 
-  BarChart3, CheckCircle2, XCircle, Users, Calendar, Filter, Sparkles 
+import { useQuery } from '@tanstack/react-query';
+import {
+  TrendingUp, DollarSign, Award, Target, ArrowUpRight,
+  Users, ShieldAlert
 } from 'lucide-react';
 import { useCrm } from '../context/CrmContext';
 import { PIPELINE_STAGES } from '../data/mockData';
+import { dashboardApi } from '../api/dashboardApi';
 
 export const DashboardView: React.FC = () => {
-  const { deals, users, formatMoney, setActiveView, setSelectedDealId } = useCrm();
+  const { deals, formatMoney, setActiveView, currentUser } = useCrm();
   const [timeRange, setTimeRange] = useState<'30D' | 'Q1' | 'YTD'>('YTD');
 
-  // Compute CRM Metrics
-  const wonDeals = deals.filter(d => d.stage === 'WON');
-  const lostDeals = deals.filter(d => d.stage === 'LOST');
-  const openDeals = deals.filter(d => d.stage !== 'WON' && d.stage !== 'LOST');
+  // Company-wide analytics are SALES_MANAGER+ only on the backend (an agent
+  // seeing every rep's numbers isn't something real RBAC should allow).
+  const canViewAnalytics = currentUser.role !== 'SALES_AGENT';
 
-  const totalWonRevenue = wonDeals.reduce((sum, d) => sum + d.value, 0);
-  const totalPipelineValue = openDeals.reduce((sum, d) => sum + d.value, 0);
-  
-  // Weighted Pipeline: value * (probability / 100)
-  const weightedPipelineValue = openDeals.reduce((sum, d) => sum + (d.value * (d.probability / 100)), 0);
+  const { data: summary, isLoading } = useQuery({
+    queryKey: ['dashboard-summary'],
+    queryFn: dashboardApi.summary,
+    enabled: canViewAnalytics,
+  });
 
-  const totalClosedCount = wonDeals.length + lostDeals.length;
-  const conversionRate = totalClosedCount > 0 ? (wonDeals.length / totalClosedCount) * 100 : 0;
+  if (!canViewAnalytics) {
+    return (
+      <div className="p-6 flex flex-col items-center justify-center h-full text-center gap-3">
+        <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center justify-center">
+          <ShieldAlert className="w-6 h-6" />
+        </div>
+        <h2 className="text-sm font-bold text-white">Dashboard requires Sales Manager access</h2>
+        <p className="text-xs text-slate-400 max-w-sm">
+          Company-wide revenue and quota data is restricted to SALES_MANAGER and ADMIN roles
+          (enforced by <code className="text-slate-300">@PreAuthorize</code> on the backend).
+          Switch to a manager account from the account menu to view it, or jump into the pipeline instead.
+        </p>
+        <button
+          onClick={() => setActiveView('pipeline')}
+          className="mt-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition"
+        >
+          Go to Sales Pipeline
+        </button>
+      </div>
+    );
+  }
 
-  // Monthly Revenue Mock Aggregates (MAD base)
-  const monthlyRevenueData = [
-    { month: 'Oct 2025', revenue: 320000, target: 400000 },
-    { month: 'Nov 2025', revenue: 480000, target: 450000 },
-    { month: 'Dec 2025', revenue: 750000, target: 600000 },
-    { month: 'Jan 2026', revenue: 420000, target: 500000 },
-    { month: 'Feb 2026', revenue: 640000, target: 600000 },
-    { month: 'Mar 2026', revenue: totalWonRevenue + 180000, target: 800000 },
-  ];
+  if (isLoading || !summary) {
+    return (
+      <div className="p-6 flex items-center justify-center h-full text-slate-400 text-sm">
+        Loading live pipeline analytics…
+      </div>
+    );
+  }
 
-  // Sales Per Employee Performance
-  const employeeMetrics = users
-    .filter(u => u.role !== 'ADMIN')
-    .map(u => {
-      const repDeals = deals.filter(d => d.assignedAgentId === u.id);
-      const repWon = repDeals.filter(d => d.stage === 'WON');
-      const repWonVal = repWon.reduce((acc, d) => acc + d.value, 0) + (u.closedRevenue * 0.4);
-      const repOpenVal = repDeals.filter(d => d.stage !== 'WON' && d.stage !== 'LOST').reduce((acc, d) => acc + d.value, 0);
-      const attainment = (repWonVal / u.quota) * 100;
+  const monthlyRevenueData = summary.monthlyRevenue.map((point) => ({
+    month: new Date(`${point.month}-01T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' }),
+    revenue: point.revenue,
+    target: point.target,
+  }));
 
-      return {
-        ...u,
-        repWonCount: repWon.length,
-        repTotalDeals: repDeals.length,
-        repWonVal,
-        repOpenVal,
-        attainment: Math.min(130, Math.round(attainment)),
-      };
-    });
+  const employeeMetrics = summary.perAgent.map((agent) => ({
+    id: agent.agentId,
+    name: agent.agentName,
+    avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(agent.agentName)}`,
+    department: '',
+    location: '',
+    quota: agent.quota,
+    repWonCount: agent.wonCount,
+    repTotalDeals: agent.totalDeals,
+    repWonVal: agent.wonValue,
+    repOpenVal: agent.openValue,
+    attainment: Math.min(130, Math.round(agent.attainmentPercent)),
+  }));
 
-  const maxRevenue = Math.max(...monthlyRevenueData.map(d => Math.max(d.revenue, d.target)));
+  const maxRevenue = Math.max(1, ...monthlyRevenueData.map(d => Math.max(d.revenue, d.target)));
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -99,11 +117,11 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-bold text-white tracking-tight">
-            {formatMoney(totalWonRevenue)}
+            {formatMoney(summary.totalWonRevenue)}
           </div>
           <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium mt-2">
             <TrendingUp className="w-3.5 h-3.5" />
-            <span>+18.4% vs last quarter</span>
+            <span>{summary.wonDealsCount} deals closed won</span>
           </div>
         </div>
 
@@ -116,11 +134,11 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-bold text-white tracking-tight">
-            {formatMoney(totalPipelineValue)}
+            {formatMoney(summary.totalPipelineValue)}
           </div>
           <div className="text-xs text-slate-400 mt-2 flex items-center justify-between">
             <span>Weighted:</span>
-            <span className="font-semibold text-indigo-300">{formatMoney(weightedPipelineValue)}</span>
+            <span className="font-semibold text-indigo-300">{formatMoney(summary.weightedPipelineValue)}</span>
           </div>
         </div>
 
@@ -133,12 +151,12 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-bold text-white tracking-tight">
-            {conversionRate.toFixed(1)}%
+            {summary.conversionRate.toFixed(1)}%
           </div>
           <div className="text-xs text-slate-400 mt-2 flex items-center gap-2">
-            <span className="text-emerald-400 font-semibold">{wonDeals.length} won</span>
+            <span className="text-emerald-400 font-semibold">{summary.wonDealsCount} won</span>
             <span>•</span>
-            <span className="text-rose-400 font-semibold">{lostDeals.length} lost</span>
+            <span className="text-rose-400 font-semibold">{summary.lostDealsCount} lost</span>
           </div>
         </div>
 
@@ -151,7 +169,7 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-bold text-white tracking-tight">
-            {openDeals.length} <span className="text-xs font-normal text-slate-400">in progression</span>
+            {summary.openDealsCount} <span className="text-xs font-normal text-slate-400">in progression</span>
           </div>
           <button
             onClick={() => setActiveView('pipeline')}
@@ -170,7 +188,7 @@ export const DashboardView: React.FC = () => {
           <div className="flex items-center justify-between mb-6">
             <div>
               <h2 className="text-sm font-bold text-white">Monthly Revenue vs Quota Target</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Historical booking performance calculated via PostgreSQL window aggregations</p>
+              <p className="text-xs text-slate-400 mt-0.5">Historical booking performance calculated via PostgreSQL date_trunc aggregation</p>
             </div>
             <div className="flex items-center gap-4 text-xs">
               <div className="flex items-center gap-1.5">
@@ -213,7 +231,7 @@ export const DashboardView: React.FC = () => {
                     />
                   </div>
                   <span className="text-[11px] text-slate-400 mt-2 font-mono truncate max-w-full">
-                    {item.month.split(' ')[0]}
+                    {item.month}
                   </span>
                 </div>
               );
@@ -221,8 +239,7 @@ export const DashboardView: React.FC = () => {
           </div>
 
           <div className="pt-3 flex items-center justify-between text-xs text-slate-500">
-            <span>Aggregated by Fiscal Quarter</span>
-            <span>Target Q1 2026: 2,400,000 MAD</span>
+            <span>Last 6 months, aggregated by close month</span>
           </div>
         </div>
 
@@ -236,7 +253,7 @@ export const DashboardView: React.FC = () => {
               {PIPELINE_STAGES.filter(s => s.id !== 'LOST').map((stage) => {
                 const stageDeals = deals.filter(d => d.stage === stage.id);
                 const stageTotal = stageDeals.reduce((sum, d) => sum + d.value, 0);
-                const pct = totalPipelineValue > 0 ? (stageTotal / totalPipelineValue) * 100 : 0;
+                const pct = summary.totalPipelineValue > 0 ? (stageTotal / summary.totalPipelineValue) * 100 : 0;
 
                 return (
                   <div key={stage.id} className="space-y-1">
@@ -292,7 +309,6 @@ export const DashboardView: React.FC = () => {
             <thead>
               <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider">
                 <th className="pb-3 pl-2">Sales Executive</th>
-                <th className="pb-3">Territory</th>
                 <th className="pb-3 text-right">Quota Target</th>
                 <th className="pb-3 text-right">Closed Revenue</th>
                 <th className="pb-3 text-right">Active Pipeline</th>
@@ -307,11 +323,10 @@ export const DashboardView: React.FC = () => {
                       <img src={emp.avatar} alt={emp.name} className="w-8 h-8 rounded-full object-cover ring-1 ring-slate-700" />
                       <div>
                         <div className="font-semibold text-white">{emp.name}</div>
-                        <div className="text-[11px] text-slate-400">{emp.department}</div>
+                        <div className="text-[11px] text-slate-400">{emp.repTotalDeals} deals · {emp.repWonCount} won</div>
                       </div>
                     </div>
                   </td>
-                  <td className="py-3 text-slate-300">{emp.location}</td>
                   <td className="py-3 text-right font-mono text-slate-400">{formatMoney(emp.quota)}</td>
                   <td className="py-3 text-right font-mono font-semibold text-emerald-400">{formatMoney(emp.repWonVal)}</td>
                   <td className="py-3 text-right font-mono text-indigo-300">{formatMoney(emp.repOpenVal)}</td>
